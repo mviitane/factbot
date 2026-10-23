@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FactBot · Finland</title>
+<style>
+  :root {
+    --blue: #003580; --blue-light: #e8eef8; --text: #1b1f24; --muted: #5b6573;
+    --border: #d5dbe3; --bg: #f6f8fb; --card: #fff; --error: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --blue: #8fb4ff; --blue-light: #1d2a40; --text: #e6e9ee; --muted: #9aa4b2;
+      --border: #2e3846; --bg: #11151b; --card: #1a2029; --error: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text); background: var(--bg);
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 20px; }
+  h1 { margin: 0; font-size: 28px; color: var(--blue); }
+  .lead { margin: 4px 0 28px; color: var(--muted); }
+  .topics { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+  button {
+    font: inherit; font-size: 14px; cursor: pointer; padding: 6px 14px;
+    border-radius: 999px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text);
+  }
+  button:hover:not(:disabled) { border-color: var(--blue); }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: var(--card); }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 24px; min-height: 120px;
+  }
+  .placeholder { color: var(--muted); }
+  .topic-label {
+    display: inline-block; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--blue); background: var(--blue-light); padding: 2px 8px; border-radius: 4px;
+  }
+  .question { font-weight: 600; margin: 10px 0 6px; }
+  .answer { font-size: 18px; margin: 0 0 16px; }
+  details { color: var(--muted); font-size: 14px; }
+  summary { cursor: pointer; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 16px; padding-top: 12px;
+    border-top: 1px solid var(--border); color: var(--muted); font-size: 13px;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .error { color: var(--error); }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px;
+    border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>FactBot 🇫🇮</h1>
+  <p class="lead">Ask about Finland. A tiny Gemma model answers from a ready-made fact.</p>
+
+  <div class="topics" id="topics">
+    <button class="primary" data-topic="">Surprise me</button>
+  </div>
+
+  <div class="card" id="result" aria-live="polite">
+    <span class="placeholder">Pick a topic to get a fact.</span>
+  </div>
+</main>
+
+<script>
+  const topicsEl = document.getElementById("topics");
+  const resultEl = document.getElementById("result");
+
+  function el(tag, attrs = {}, text = "") {
+    const node = document.createElement(tag);
+    Object.assign(node, attrs);
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  function setBusy(busy) {
+    topicsEl.querySelectorAll("button").forEach(b => (b.disabled = busy));
+  }
+
+  function meta(items) {
+    const div = el("div", { className: "meta" });
+    for (const [label, value, isCode] of items) {
+      if (!value) continue;
+      const span = el("span", {}, label + ": ");
+      span.append(isCode ? el("code", {}, value) : value);
+      div.append(span);
+    }
+    return div;
+  }
+
+  async function ask(topic) {
+    setBusy(true);
+    resultEl.replaceChildren(el("span", { className: "spinner" }),
+                             el("span", { className: "placeholder" }, "Asking FactBot…"));
+    const started = performance.now();
+    try {
+      const url = topic ? `/fact?topic=${encodeURIComponent(topic)}` : "/fact";
+      const resp = await fetch(url);
+      const ms = Math.round(performance.now() - started);
+      const traceId = resp.headers.get("X-Trace-Id");
+      const data = await resp.json().catch(() => ({}));
+
+      if (!resp.ok) {
+        resultEl.replaceChildren(
+          el("p", { className: "error" }, `Error ${resp.status}: ${data.detail || resp.statusText}`),
+          meta([["Time", `${ms} ms`], ["Trace", traceId, true]]),
+        );
+        return;
+      }
+
+      const fact = el("details");
+      fact.append(el("summary", {}, "Source fact"), el("p", {}, data.fact));
+      resultEl.replaceChildren(
+        el("span", { className: "topic-label" }, data.topic),
+        el("p", { className: "question" }, data.question),
+        el("p", { className: "answer" }, data.answer || "(empty answer)"),
+        fact,
+        meta([["Model", data.model], ["Time", `${ms} ms`], ["Trace", traceId, true]]),
+      );
+    } catch (err) {
+      resultEl.replaceChildren(el("p", { className: "error" }, `Request failed: ${err.message}`));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  topicsEl.addEventListener("click", e => {
+    const btn = e.target.closest("button");
+    if (btn) ask(btn.dataset.topic);
+  });
+
+  fetch("/topics")
+    .then(r => r.json())
+    .then(({ topics }) => {
+      for (const t of topics) {
+        const btn = el("button", {}, t[0].toUpperCase() + t.slice(1));
+        btn.dataset.topic = t;
+        topicsEl.append(btn);
+      }
+    })
+    .catch(() => {});
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Gemma 3 270M tuned for a single CPU thread and short answers.
+# The OpenAI-compatible API can't pass these options, so they are baked in here.
+FROM gemma3:270m
+PARAMETER num_thread 1
+PARAMETER num_ctx 1024
+PARAMETER num_predict 80
+PARAMETER temperature 0.7

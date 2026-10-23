@@ -1,0 +1,175 @@
+name: factbot
+
+# Shared OpenTelemetry settings for all Python services.
+# Host networking means "localhost" is the host itself, so the
+# Collector running as a Linux service is reachable at localhost:4318.
+x-otel-env: &otel-env
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: otlp
+  OTEL_LOGS_EXPORTER: otlp
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTLP_ENDPOINT:-http://localhost:4318}
+  # Python defaults to gRPC (4317); 4318 is the OTLP/HTTP port.
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_METRIC_EXPORT_INTERVAL: "60000"
+  # Latest GenAI semconv (gen_ai.provider.name, gen_ai.input/output.messages),
+  # which Dynatrace AI Observability expects.
+  OTEL_SEMCONV_STABILITY_OPT_IN: gen_ai_latest_experimental
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=factbot,service.version=0.1.0,deployment.environment.name=local-demo
+  SERVER_HOST: 127.0.0.1
+
+x-common: &common
+  network_mode: host
+  cpuset: "${DEMO_CPU:-7}"   # every container shares this one logical CPU
+
+x-healthcheck: &healthcheck
+  test: ["CMD", "python", "/app/healthcheck.py"]
+  interval: 10s
+  timeout: 3s
+  retries: 30
+
+services:
+  ollama:
+    <<: *common
+    image: ollama/ollama:latest
+    mem_limit: 1g
+    environment:
+      OLLAMA_HOST: 127.0.0.1:${OLLAMA_PORT:-11434}
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: 10m
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # Plain TCP connect, like the Python services: `ollama list` would make HTTP
+      # requests every 5s that OBI traces as spans.
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/${OLLAMA_PORT:-11434}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ollama-init:
+    <<: *common
+    image: ollama/ollama:latest
+    mem_limit: 256m
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: 127.0.0.1:${OLLAMA_PORT:-11434}
+      FORCE_RECREATE: ${FORCE_RECREATE:-0}
+    volumes:
+      - ./ollama:/setup:ro
+    entrypoint: ["/bin/sh", "/setup/init.sh"]
+
+  # OpenTelemetry eBPF Instrumentation for Ollama, which has no OTel support of its own.
+  # Scoped to Ollama only: sharing the ollama container's PID namespace hides every
+  # other process on the host, and obi/config.yml limits it to `ollama serve` on its
+  # API port (skipping the llama-server runner). eBPF still needs privileged.
+  obi:
+    <<: *common
+    image: otel/ebpf-instrument:${OBI_VERSION:-v0.15.2}
+    # eBPF maps are charged to the container's memory; 256m fails to load the Go tracer.
+    mem_limit: 768m
+    privileged: true
+    pid: "service:ollama"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OTEL_EBPF_CONFIG_PATH: /etc/obi/config.yml
+      OTEL_SERVICE_NAME: ollama
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=factbot,deployment.environment.name=local-demo,process.executable.name=factbot-ollama
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTLP_ENDPOINT:-http://localhost:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EBPF_METRICS_INTERVAL: 60s
+      OTEL_EBPF_TRACE_PRINTER: ${OBI_TRACE_PRINTER:-disabled}
+    volumes:
+      - ./obi/config.yml:/etc/obi/config.yml:ro
+
+  facts:
+    <<: *common
+    build:
+      context: ./services
+      args:
+        SERVICE: facts
+    image: factbot-facts:local
+    mem_limit: 128m
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: facts
+      SERVER_PORT: ${FACTS_PORT:-8083}
+      LOG_LEVEL: WARNING
+      FACTS_ERROR_RATE: ${FACTS_ERROR_RATE:-0}
+      FACTS_SLOW_MS: ${FACTS_SLOW_MS:-0}
+    healthcheck: *healthcheck
+
+  orchestrator:
+    <<: *common
+    build:
+      context: ./services
+      args:
+        SERVICE: orchestrator
+    image: factbot-orchestrator:local
+    mem_limit: 256m
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+      facts:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: orchestrator
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: ${CAPTURE_GENAI_CONTENT:-no_content}
+      SERVER_PORT: ${ORCHESTRATOR_PORT:-8082}
+      LOG_LEVEL: INFO
+      FACTS_URL: http://127.0.0.1:${FACTS_PORT:-8083}
+      LLM_BASE_URL: http://127.0.0.1:${OLLAMA_PORT:-11434}/v1
+      LLM_MODEL: factbot-gemma
+      LLM_TIMEOUT_S: "50"
+      OPENAI_API_KEY: ollama   # required by the client library, ignored by Ollama
+    healthcheck: *healthcheck
+
+  frontend:
+    <<: *common
+    build:
+      context: ./services
+      args:
+        SERVICE: frontend
+    image: factbot-frontend:local
+    mem_limit: 160m
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: frontend
+      SERVER_HOST: ${FRONTEND_HOST:-127.0.0.1}   # only the frontend can be reached from the LAN
+      SERVER_PORT: ${FRONTEND_PORT:-8081}
+      LOG_LEVEL: WARNING
+      ORCHESTRATOR_URL: http://127.0.0.1:${ORCHESTRATOR_PORT:-8082}
+    healthcheck: *healthcheck
+
+  ticker:
+    <<: *common
+    image: curlimages/curl:latest
+    mem_limit: 32m
+    depends_on:
+      frontend:
+        condition: service_healthy
+    environment:
+      FRONTEND_URL: http://127.0.0.1:${FRONTEND_PORT:-8081}
+      TICK_SECONDS: ${TICK_SECONDS:-60}
+    # Fire the request in the background so the cadence stays at TICK_SECONDS
+    # regardless of how long the LLM takes to answer.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          ( code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 58 "$$FRONTEND_URL/fact");
+            echo "$$(date -u +%H:%M:%S) frontend responded $$code" ) &
+          sleep "$$TICK_SECONDS"
+        done
+
+volumes:
+  ollama-models:

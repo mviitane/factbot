@@ -1,0 +1,11 @@
+# OBI discovery, scoped to Ollama's API server only.
+# The container already shares only the ollama container's PID namespace; this
+# further limits instrumentation to `ollama serve` on its API port and skips the
+# llama-server runner, whose internal /health, /tokenize and /completion calls
+# would otherwise add noisy spans. Selectors in one entry must all match.
+discovery:
+  instrument:
+    - open_ports: 11434
+      exe_path: "*/ollama"
+  exclude_instrument:
+    - exe_path: "*llama-server*"

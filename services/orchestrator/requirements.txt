@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+opentelemetry-distro
+opentelemetry-exporter-otlp
+httpx
+openai
+opentelemetry-instrumentation-openai-v2
+# openai-v2 2.4b0 imports opentelemetry.util.genai.instruments, which util-genai
+# 1.2b0+ renamed to _instruments; without this pin the OpenAI instrumentor is
+# silently skipped and no GenAI spans or metrics are emitted.
+opentelemetry-util-genai==1.1b0
